@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Sequence
@@ -13,6 +16,7 @@ from rich.syntax import Syntax
 from rich.table import Table
 
 from . import __version__
+from .agent import APKAgent, AgentRunResult, OpenRouterClient
 from .editor import APKEditor, APKMetadata, ArchiveEntry, CertificateInfo
 
 app = typer.Typer(help="Inspect and edit Android APK files.", add_completion=False)
@@ -222,6 +226,122 @@ def repack(source: Path = typer.Argument(..., exists=True, file_okay=False, dir_
     console.print(f"Wrote archive to [cyan]{target}[/cyan]")
 
 
+
+@app.command()
+def agent(apk: Path = typer.Argument(..., exists=True, dir_okay=False, readable=True,
+                                     help="APK to modify with the AI agent"),
+          instructions: Optional[str] = typer.Argument(None, help="What the agent should change"),
+          api_key: Optional[str] = typer.Option(None, "--api-key",
+                                               envvar="OPENROUTER_API_KEY",
+                                               help="OpenRouter API key (or set OPENROUTER_API_KEY)"),
+          model: str = typer.Option("openai/gpt-4o-mini", "--model",
+                                    help="OpenRouter model identifier to use"),
+          temperature: float = typer.Option(0.2, "--temperature", min=0.0, max=2.0,
+                                            help="Sampling temperature passed to the model"),
+          max_steps: int = typer.Option(12, "--max-steps", min=1, max=40,
+                                        help="Maximum LLM/agent turns"),
+          output: Optional[Path] = typer.Option(None, "--output", "-o",
+                                                help="Write the patched APK to this path"),
+          in_place: bool = typer.Option(False, "--in-place", help="Overwrite the input APK"),
+          keep_backup: bool = typer.Option(True, "--backup/--no-backup",
+                                           help="Keep *.bak when patching in place"),
+          workspace: Optional[Path] = typer.Option(None, "--workspace",
+                                                   help="Use/create this directory for the unpacked APK"),
+          keep_workspace: bool = typer.Option(False, "--keep-workspace",
+                                              help="Do not delete the temporary workspace"),
+          dry_run: bool = typer.Option(False, "--dry-run",
+                                       help="Skip repacking even if files changed"),
+          referer: Optional[str] = typer.Option(None, "--referer",
+                                               help="Optional HTTP-Referer header for OpenRouter"),
+          title: Optional[str] = typer.Option(None, "--title",
+                                             help="Optional X-Title header for OpenRouter"),
+          timeout: float = typer.Option(90.0, "--timeout", min=10.0, max=300.0,
+                                        help="HTTP timeout in seconds")) -> None:
+    """Let an OpenRouter-backed agent inspect and modify an APK."""
+
+    if not instructions:
+        instructions = typer.prompt("Describe the APK edits you'd like the agent to perform")
+    instructions = instructions.strip()
+    if not instructions:
+        _fail("Instructions cannot be empty")
+
+    apk = apk.expanduser().resolve()
+
+    resolved_key = api_key or os.environ.get("OPENROUTER_API_KEY")
+    if not resolved_key:
+        _fail("Provide an OpenRouter API key via --api-key or OPENROUTER_API_KEY")
+    if in_place and output:
+        _fail("Cannot combine --in-place with --output")
+
+    editor = _editor(apk)
+    metadata = editor.metadata()
+
+    workspace_dir, cleanup = _prepare_workspace(workspace, keep_workspace)
+    console.print(f"Extracting [cyan]{apk}[/cyan] into [magenta]{workspace_dir}[/magenta]…")
+    try:
+        editor.extract_all(workspace_dir)
+    except Exception:
+        if cleanup:
+            shutil.rmtree(workspace_dir, ignore_errors=True)
+        raise
+
+    if dry_run:
+        cleanup = False
+
+    client = OpenRouterClient(api_key=resolved_key,
+                              timeout=timeout,
+                              referer=referer,
+                              title=title)
+    agent_runner = APKAgent(workspace=workspace_dir,
+                            metadata=metadata,
+                            client=client,
+                            model=model,
+                            instructions=instructions,
+                            max_steps=max_steps,
+                            temperature=temperature,
+                            console=console)
+
+    try:
+        result = agent_runner.run()
+    except Exception as exc:
+        console.print(f"[red]Agent failed:[/red] {exc}")
+        if cleanup:
+            shutil.rmtree(workspace_dir, ignore_errors=True)
+        raise typer.Exit(code=1)
+
+    console.print(f"[green]Agent completed in {result.steps} step(s)[/green]")
+    if result.summary:
+        console.print(result.summary)
+    if result.changelog:
+        for item in result.changelog:
+            console.print(f"- {item}")
+
+    if dry_run:
+        console.print("[yellow]Dry-run enabled: no APK was rebuilt[/yellow]")
+        console.print(f"Workspace preserved at [magenta]{workspace_dir}[/magenta]")
+        return
+
+    destination = _resolve_agent_output_path(apk, output, in_place)
+    if not result.modified:
+        console.print("[yellow]Agent did not change any files; skipping repack[/yellow]")
+        if cleanup:
+            shutil.rmtree(workspace_dir, ignore_errors=True)
+        else:
+            console.print(f"Workspace left at [magenta]{workspace_dir}[/magenta]")
+        return
+
+    console.print("Repacking modified workspace…")
+    final_path = _finalize_agent_artifact(workspace_dir, apk, destination, in_place, keep_backup)
+    console.print(f"Saved updated APK to [cyan]{final_path}[/cyan]")
+    if in_place and keep_backup:
+        console.print(f"Backup stored as [magenta]{apk.with_name(apk.name + '.bak')}[/magenta]")
+
+    if cleanup:
+        shutil.rmtree(workspace_dir, ignore_errors=True)
+    else:
+        console.print(f"Workspace left at [magenta]{workspace_dir}[/magenta]")
+
+
 def _editor(apk: Path) -> APKEditor:
     try:
         return APKEditor(apk)
@@ -324,6 +444,55 @@ def _compression_ratio(entry: ArchiveEntry) -> Optional[float]:
 
 def _fmt_datetime(value: datetime) -> str:
     return value.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _prepare_workspace(user_path: Optional[Path], keep_workspace: bool) -> tuple[Path, bool]:
+    if user_path:
+        workspace = user_path.expanduser().resolve()
+        if workspace.exists():
+            if any(workspace.iterdir()):
+                _fail("Workspace directory must be empty")
+        else:
+            workspace.mkdir(parents=True)
+        return workspace, False
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="apkraft-agent-"))
+    return tmp_dir, not keep_workspace
+
+
+def _resolve_agent_output_path(apk: Path,
+                               output: Optional[Path],
+                               in_place: bool) -> Path:
+    if in_place:
+        return apk
+    if output:
+        return output.expanduser().resolve()
+    suffix = ''.join(apk.suffixes) or '.apk'
+    return apk.with_name(f"{apk.stem}.agent{suffix}")
+
+
+def _finalize_agent_artifact(workspace: Path,
+                             apk: Path,
+                             destination: Path,
+                             in_place: bool,
+                             keep_backup: bool) -> Path:
+    tmp_dir = Path(tempfile.mkdtemp(prefix="apkraft-agent-build-"))
+    tmp_file = tmp_dir / destination.name
+    try:
+        APKEditor.repack_directory(workspace, tmp_file)
+        if in_place:
+            if keep_backup:
+                backup = apk.with_name(apk.name + ".bak")
+                if backup.exists():
+                    backup.unlink()
+                shutil.copy2(apk, backup)
+            os.replace(tmp_file, apk)
+            return apk
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(tmp_file, destination)
+        return destination
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def _fail(message: str) -> None:

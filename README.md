@@ -61,6 +61,32 @@ apkraft repack workdir patched.apk
 If you rather keep the original APK untouched while editing, pass
 `--output new.apk` to the editing commands instead of `--in-place`.
 
+## AI agent (experimental)
+
+APKraft now ships with an optional AI-powered workflow that can help you inspect
+and edit APK contents using natural language prompts. The `apkraft agent`
+command unpacks an APK into a workspace directory and lets an OpenRouter-hosted
+model drive a constrained set of tooling actions (list directories, read text
+assets, write files, delete paths). Bring your own OpenRouter API key:
+
+```bash
+export OPENROUTER_API_KEY="sk-or-v1-your-key"
+apkraft agent samples/app.apk "Remove the debug logging config"
+```
+
+Important notes:
+
+- The agent only edits plain-text assets (XML/JSON/smali/etc.). Binary blobs and
+  signing are out of scope.
+- Every run extracts the APK into a temporary workspace. Pass `--workspace` to
+  reuse a folder or `--dry-run` to skip rebuilding so you can inspect changes
+  manually.
+- Use flags like `--model`, `--temperature`, or `--max-steps` to steer the
+  OpenRouter request, and `--referer`/`--title` if your account requires those
+  headers.
+- Combine `--in-place`/`--backup`/`--output` the same way as the manual editing
+  commands once you are ready to repack.
+
 ## Development
 
 - Format/linting is intentionally lightweight; focus on readable, well-tested code.
