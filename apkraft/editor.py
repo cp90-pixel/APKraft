@@ -1,10 +1,18 @@
-"""Core APK manipulation helpers used by the CLI."""
+"""Core APK manipulation helpers used by the CLI.
+
+WARNING: APKraft is **not** intended to help you release modified or unlocked
+versions of games. Use these utilities only for legitimate inspection,
+debugging, or archival work you are legally permitted to perform. Bypassing
+licenses or redistribution controls with this editor can violate the rights of
+game developers and platform terms of service.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Iterable, Optional, Sequence
+import warnings
 import fnmatch
 import hashlib
 import os
@@ -70,13 +78,19 @@ class ArchiveEntry:
 
 
 class APKEditor:
-    """Lightweight utility that performs high level APK operations."""
+    """Lightweight utility that performs high level APK operations.
+
+    This editor is provided for responsible research and maintenance tasks
+    only. Never rely on it to package or distribute modified/unlocked versions
+    of commercial games or other software you are not licensed to publish.
+    """
 
     def __init__(self, apk_path: Path | str) -> None:
         self.apk_path = Path(apk_path).expanduser().resolve()
         if not self.apk_path.is_file():
             raise FileNotFoundError(f"APK not found: {self.apk_path}")
         self._apk = APK(str(self.apk_path))
+        self._warn_release_misuse()
 
     # ------------------------------------------------------------------
     # Inspection helpers
@@ -409,3 +423,13 @@ class APKEditor:
         resolved_destination.parent.mkdir(parents=True, exist_ok=True)
         with zf.open(info, 'r') as src, resolved_destination.open('wb') as dst:
             shutil.copyfileobj(src, dst)
+
+    @staticmethod
+    def _warn_release_misuse() -> None:
+        warnings_list = [
+            "APKraft editor must not be used to release modified or unlocked copies of commercial games.",
+            "Respect the original developers' licenses and distribution agreements when working with APKraft.",
+            "Distributing APKs altered with this tool can violate terms of service and the law; keep usage to legitimate testing.",
+        ]
+        for message in warnings_list:
+            warnings.warn(message, UserWarning, stacklevel=3)
