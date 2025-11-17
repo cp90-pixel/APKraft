@@ -234,7 +234,7 @@ def agent(apk: Path = typer.Argument(..., exists=True, dir_okay=False, readable=
           api_key: Optional[str] = typer.Option(None, "--api-key",
                                                envvar="OPENROUTER_API_KEY",
                                                help="OpenRouter API key (or set OPENROUTER_API_KEY)"),
-          model: str = typer.Option("openai/gpt-4o-mini", "--model",
+          model: str = typer.Option("kwaipilot/kat-coder-pro:free", "--model",
                                     help="OpenRouter model identifier to use"),
           temperature: float = typer.Option(0.2, "--temperature", min=0.0, max=2.0,
                                             help="Sampling temperature passed to the model"),
