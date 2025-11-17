@@ -87,6 +87,14 @@ Important notes:
 - Combine `--in-place`/`--backup`/`--output` the same way as the manual editing
   commands once you are ready to repack.
 
+### Basic GUI
+
+Prefer clicks over flags? Run `apkraft gui` to launch a lightweight Tk interface
+for the same agent workflow. You can browse for an APK, paste your OpenRouter API
+key/instructions, and watch the log output without leaving a windowed
+environment. The GUI requires a Python build with Tk support (standard on most
+desktop distributions).
+
 ## Development
 
 - Format/linting is intentionally lightweight; focus on readable, well-tested code.

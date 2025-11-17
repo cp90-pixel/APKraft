@@ -17,6 +17,9 @@ from rich.table import Table
 
 from . import __version__
 from .agent import APKAgent, AgentRunResult, OpenRouterClient
+from .agent_workflow import (finalize_agent_artifact,
+                             prepare_workspace,
+                             resolve_agent_output_path)
 from .editor import APKEditor, APKMetadata, ArchiveEntry, CertificateInfo
 
 app = typer.Typer(help="Inspect and edit Android APK files.", add_completion=False)
@@ -276,7 +279,10 @@ def agent(apk: Path = typer.Argument(..., exists=True, dir_okay=False, readable=
     editor = _editor(apk)
     metadata = editor.metadata()
 
-    workspace_dir, cleanup = _prepare_workspace(workspace, keep_workspace)
+    try:
+        workspace_dir, cleanup = prepare_workspace(workspace, keep_workspace)
+    except ValueError as exc:
+        _fail(str(exc))
     console.print(f"Extracting [cyan]{apk}[/cyan] into [magenta]{workspace_dir}[/magenta]…")
     try:
         editor.extract_all(workspace_dir)
@@ -321,7 +327,7 @@ def agent(apk: Path = typer.Argument(..., exists=True, dir_okay=False, readable=
         console.print(f"Workspace preserved at [magenta]{workspace_dir}[/magenta]")
         return
 
-    destination = _resolve_agent_output_path(apk, output, in_place)
+    destination = resolve_agent_output_path(apk, output, in_place)
     if not result.modified:
         console.print("[yellow]Agent did not change any files; skipping repack[/yellow]")
         if cleanup:
@@ -331,7 +337,7 @@ def agent(apk: Path = typer.Argument(..., exists=True, dir_okay=False, readable=
         return
 
     console.print("Repacking modified workspace…")
-    final_path = _finalize_agent_artifact(workspace_dir, apk, destination, in_place, keep_backup)
+    final_path = finalize_agent_artifact(workspace_dir, apk, destination, in_place, keep_backup)
     console.print(f"Saved updated APK to [cyan]{final_path}[/cyan]")
     if in_place and keep_backup:
         console.print(f"Backup stored as [magenta]{apk.with_name(apk.name + '.bak')}[/magenta]")
@@ -340,6 +346,21 @@ def agent(apk: Path = typer.Argument(..., exists=True, dir_okay=False, readable=
         shutil.rmtree(workspace_dir, ignore_errors=True)
     else:
         console.print(f"Workspace left at [magenta]{workspace_dir}[/magenta]")
+
+
+@app.command()
+def gui() -> None:
+    """Launch the basic Tkinter GUI for the AI agent."""
+
+    try:
+        from .gui import launch_agent_gui
+    except Exception as exc:  # pragma: no cover - import guard
+        _fail(f"GUI components unavailable: {exc}")
+
+    try:
+        launch_agent_gui()
+    except Exception as exc:  # pragma: no cover - GUI runtime guard
+        _fail(str(exc))
 
 
 def _editor(apk: Path) -> APKEditor:
@@ -444,55 +465,6 @@ def _compression_ratio(entry: ArchiveEntry) -> Optional[float]:
 
 def _fmt_datetime(value: datetime) -> str:
     return value.strftime("%Y-%m-%d %H:%M:%S")
-
-
-def _prepare_workspace(user_path: Optional[Path], keep_workspace: bool) -> tuple[Path, bool]:
-    if user_path:
-        workspace = user_path.expanduser().resolve()
-        if workspace.exists():
-            if any(workspace.iterdir()):
-                _fail("Workspace directory must be empty")
-        else:
-            workspace.mkdir(parents=True)
-        return workspace, False
-
-    tmp_dir = Path(tempfile.mkdtemp(prefix="apkraft-agent-"))
-    return tmp_dir, not keep_workspace
-
-
-def _resolve_agent_output_path(apk: Path,
-                               output: Optional[Path],
-                               in_place: bool) -> Path:
-    if in_place:
-        return apk
-    if output:
-        return output.expanduser().resolve()
-    suffix = ''.join(apk.suffixes) or '.apk'
-    return apk.with_name(f"{apk.stem}.agent{suffix}")
-
-
-def _finalize_agent_artifact(workspace: Path,
-                             apk: Path,
-                             destination: Path,
-                             in_place: bool,
-                             keep_backup: bool) -> Path:
-    tmp_dir = Path(tempfile.mkdtemp(prefix="apkraft-agent-build-"))
-    tmp_file = tmp_dir / destination.name
-    try:
-        APKEditor.repack_directory(workspace, tmp_file)
-        if in_place:
-            if keep_backup:
-                backup = apk.with_name(apk.name + ".bak")
-                if backup.exists():
-                    backup.unlink()
-                shutil.copy2(apk, backup)
-            os.replace(tmp_file, apk)
-            return apk
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(tmp_file, destination)
-        return destination
-    finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def _fail(message: str) -> None:
